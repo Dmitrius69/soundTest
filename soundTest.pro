@@ -18,3 +18,8 @@ SOURCES += main.cpp\
 HEADERS  += mainwindow.h
 
 FORMS    += mainwindow.ui
+
+#добавили в проект звуковые библиотеки
+unix {
+  LIBS += -lao -lmpg123 -lm
+}

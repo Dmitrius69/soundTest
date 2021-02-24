@@ -7,6 +7,13 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 
+#include <mpg123.h>
+#include <ao/ao.h>
+
+#define SUCCESS 1
+#define ERROR 0
+#define BITS 8
+
 
 namespace Ui {
 class MainWindow;
@@ -20,6 +27,19 @@ public:
     explicit MainWindow(QWidget *parent = 0);
     ~MainWindow();
     int read_audio_file(QString flName);
+    int sound_subsystem_init();
+    int sound_subsystem_dispose();
+    mpg123_handle *m;     //указатель на mpg123 исходный файл
+    unsigned char *buffer; //буффер, куда записываем семплы
+    ao_device *ao_dev; //устройство вывода звука
+    int ao_driver;
+    size_t buffer_size;
+    size_t done;
+    int err;
+
+    ao_sample_format ao_format;
+    int channels, encoding;
+    long rate;
 
 private slots:
     void on_actionOpen_triggered();
