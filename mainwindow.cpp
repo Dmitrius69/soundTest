@@ -41,7 +41,12 @@ void MainWindow::on_actionOpen_triggered()
 }
 
 
-
+//функция обертка
+//необходима для запуска функции воспроизведния
+//в отдельном потоке
+//свячзанно с тем, что потоковая функция должна быть
+//описанна как static, но в этом случае не работают
+//динамически подгружаемые mpg123 и ao
 void* MainWindow::run(void* p)
 {
     MainWindow* pl = reinterpret_cast<MainWindow*>(p);
@@ -89,12 +94,6 @@ void MainWindow::on_pushButton_clicked()
     pthread_create(&playMusic,NULL,MainWindow::run,this);
     //timer->start(100);
 
-    //while (!tickFlag)
-    //{
-    //  cText = cText + "*";
-    //  ui->consoleOut->setText(cText);
-   // }
-
    //возможная причина "подвисания"
    // pthread_join(playMusic, NULL);
 
@@ -105,7 +104,7 @@ void MainWindow::on_pushButton_2_clicked()
     //stop audio here
 }
 
-
+//открываем звуковой файл и производим декодировку
 int MainWindow::read_audio_file(QString flName)
 {
     unsigned char inbuff[INBUFF];
