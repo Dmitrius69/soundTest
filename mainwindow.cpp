@@ -54,11 +54,15 @@ void MainWindow::play_in_thread()
 {
     if (ao_dev !=NULL)
     {
-
-        unsigned char sndbuffer[INBUFF];
+       //здесь происходит управление воспроизведением звука
+       //доработать алгоритм управления звковым потоком
+       //добавить четыре состояния
+       //ИГРА, СТОП, ВПЕРЕД и НАЗАД
+       //добавить возможность вопспроизведения с любой точки
+      unsigned char sndbuffer[INBUFF];
 
         /* decode and play */
-      //timer->start(100);//запускаем таймер, для того что бы взаимодействовать с progressbar
+      timer->start(100);//запускаем таймер, для того что бы взаимодействовать с progressbar
       while (mpg123_read(m, sndbuffer, INBUFF, &done) == MPG123_OK)
       {
           //printf("*");
@@ -129,7 +133,7 @@ int MainWindow::read_audio_file(QString flName)
        mpg123_getformat(m, &rate, &channels, &encoding);
        printf("rate = %d, channels = %ld encoding = %ld\n", rate, channels, encoding);
        gbytes =  mpg123_length(m);
-
+       buffer = (unsigned char*) malloc(INBUFF * sizeof(unsigned char));
 
        gbytes = (int) (gbytes / 4097);
        ui->labelMsg->setText(QString("Bytes read %1").arg(gbytes));
@@ -164,7 +168,7 @@ int MainWindow::sound_subsystem_init()
 int MainWindow::sound_subsystem_dispose()
 {
 
-    free(buffer);
+    if (buffer != NULL) free(buffer);
     ao_close(ao_dev);
     mpg123_close(m);
     mpg123_delete(m);
@@ -176,7 +180,7 @@ int MainWindow::sound_subsystem_dispose()
 
 void MainWindow::slotTimerAlarm()
 {
-   ui->progressBar->setValue(tickFlag++);
+   ui->progressBar->setValue(tickFlag);
    if (tickFlag >= ui->progressBar->maximum()) timer->stop();
 }
 
