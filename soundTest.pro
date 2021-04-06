@@ -11,11 +11,17 @@ greaterThan(QT_MAJOR_VERSION, 4): QT += widgets
 TARGET = soundTest
 TEMPLATE = app
 
+#CONFIG += -std=c++11  -std=gnu++11
+#эта строка необходима, что бы компилятоп смог
+#правильно обрабатывать библиотеку atomic!
+QMAKE_CXXFLAGS += -std=c++11  -std=gnu++11
 
 SOURCES += main.cpp\
-        mainwindow.cpp
+        mainwindow.cpp \
+    soundchart.cpp
 
-HEADERS  += mainwindow.h
+HEADERS  += mainwindow.h \
+    soundchart.h
 
 FORMS    += mainwindow.ui
 

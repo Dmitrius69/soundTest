@@ -12,14 +12,20 @@
 #include <fcntl.h>
 #include <pthread.h>
 
+
 #include <mpg123.h>
 #include <ao/ao.h>
+
+#include "soundchart.h"
 
 #define SUCCESS 1
 #define ERROR 0
 #define BITS 8
 #define INBUFF 16384
 #define OUTBUFF 32768
+#define UP_BUFFER_SIZE 4096
+
+typedef enum {STOP, PLAY, PAUSE, QUIT} PlayerState;
 
 namespace Ui {
 class MainWindow;
@@ -36,8 +42,12 @@ public:
     int sound_subsystem_init();
     int sound_subsystem_dispose();
     void play_in_thread();
-    void drawBar(int idx, int bHeigth);
+    void drawBar(int idx, int bHeigth, int delta, int wBar);
     void drawSndSample();
+    void setMedia(QString path);
+    void setPosition(qint64 position);
+    void setVolume(int volume);
+    void clearScene();
 
     mpg123_handle *m;     //указатель на mpg123 исходный файл
     unsigned char *buffer; //буффер, куда записываем семплы
@@ -52,6 +62,16 @@ public:
     long rate;
     unsigned char sndbuffer[INBUFF];
     QString rawbuff;
+    struct mPoint { int gX1 ;
+              int gY1 ;
+              int gW1 ;
+              int gH1 ;
+            }  ;
+
+    mPoint sndBurs[INBUFF]; // здесь будем хранить бары построенные от семплов
+    int widthBar; //ширина одного тика
+    int deltaBar; //расстояние от начала бара n-1 до бара n
+    int gX;
 
 
 private slots:
@@ -65,25 +85,22 @@ private slots:
 
     void slotTimerAlarm();
 
+    void on_verticalSlider_valueChanged(int value);
+
+    void on_toolButton_2_clicked();
+
 private:
-    static void* run(void* p);
+    static void* run(void* p);//воспроизводим аудиопоток
     int tickFlag;
     pthread_t playMusic;
     QTimer *timer;
     Ui::MainWindow *ui;
     static pthread_mutex_t  playerMutex;
-
+    SoundChart* sChart;
+    double           volume01;
+    PlayerState      playerSt;
     QGraphicsScene      *scene;     // Объявляем сцену для отрисовки
-    struct mPoint { int gX1 ;
-              int gY1 ;
-              int gW1 ;
-              int gH1 ;
-            }  ;
 
-    mPoint sndBurs[INBUFF]; // здесь будем хранить бары построенные от семплов
-    int widthBar; //ширина одного тика
-    int deltaBar; //расстояние от начала бара n-1 до бара n
-    int gX;
 
 };
 
