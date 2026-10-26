@@ -48,6 +48,21 @@ void SoundChart::createHoldbars()
 
 }
 
+void SoundChart::appendBars(int len, unsigned char data[])
+{
+    int y;
+    y=startY/2;
+    int shift = bars.size();
+    for (int i = shift; i<len+shift; i++)
+   {
+       QGraphicsRectItem * item = sndChartScene->addRect(startX+deltaBar*i, y, widthBar, 0, chartPen, chartBrush); // высота всех делений равна нулю
+       //bars.push_back(item);
+       bars.append(item);
+
+   }
+}
+
+
 void SoundChart::drawScene()
 {
     int gW, gH;
@@ -96,6 +111,7 @@ void SoundChart::setWidth(int wBar)
 void SoundChart::setDelta(int dBars)
 {
     deltaBar = dBars;
+
 }
 
 void SoundChart::setLenDataSeries(int len)

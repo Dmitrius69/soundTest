@@ -1,449 +1,595 @@
 #include "mainwindow.h"
 #include "ui_mainwindow.h"
-#include <QDebug>
-#include <QMessageBox>
+
+#include "spectrumwidget.h"
+
+#include <QDir>
 #include <QFileDialog>
-#include <pthread.h>
+#include <QFileInfo>
+#include <QMessageBox>
+#include <QMouseEvent>
+#include <QStyle>
+#include <QStyleOptionSlider>
+#include <QTimer>
 
+#include <cstring>
 
+namespace {
 
+QString formatTime(qint64 frames, long sampleRate)
+{
+    if (sampleRate <= 0 || frames < 0)
+        return QString("00:00");
 
+    const qint64 seconds = frames / sampleRate;
+    const qint64 hours   = seconds / 3600;
+    const qint64 minutes = (seconds / 60) % 60;
+    const qint64 secs    = seconds % 60;
 
+    if (hours > 0)
+        return QString("%1:%2:%3")
+                .arg(hours)
+                .arg(minutes, 2, 10, QChar('0'))
+                .arg(secs, 2, 10, QChar('0'));
 
-//#define INBUFF 16384
-//#define OUTBUFF 32768
-//мьютекс для защиты потока воспроизведения
-pthread_mutex_t MainWindow::playerMutex = PTHREAD_MUTEX_INITIALIZER;
+    return QString("%1:%2")
+            .arg(minutes, 2, 10, QChar('0'))
+            .arg(secs, 2, 10, QChar('0'));
+}
 
+} // namespace
 
-MainWindow::MainWindow(QWidget *parent) :
-    QMainWindow(parent),
-    ui(new Ui::MainWindow)
+MainWindow::MainWindow(QWidget *parent)
+    : QMainWindow(parent),
+      m(0),
+      ao_dev(0),
+      ao_driver(0),
+      done(0),
+      err(0),
+      channels(0),
+      encoding(0),
+      rate(0),
+      playMusic(),
+      threadRunning(false),
+      timer(0),
+      ui(new Ui::MainWindow),
+      analyzer(0),
+      volume01(0.8),
+      playerSt(PAUSE),
+      framesPlayed(0),
+      totalFrames(0),
+      seekRequest(-1),
+      updatingSlider(false)
 {
     ui->setupUi(this);
-    timer = new QTimer();
-    connect(timer, SIGNAL(timeout()), this, SLOT(slotTimerAlarm()));
+    std::memset(&ao_format, 0, sizeof(ao_format));
+
     sound_subsystem_init();
-    scene = new QGraphicsScene();
-    deltaBar = 0;
-    widthBar = 0;
-    gX=0;
-    //ui->graphicsView->setScene(scene);
-    sChart = new SoundChart(parent, ui->graphicsView);
-    sChart->setLenDataSeries(512);
-    sChart->setDelta(8);
-    sChart->setWidth(3);
 
+    analyzer = new SpectrumAnalyzer();
 
+    ui->globsonicView->setAnalyzer(analyzer);
+    ui->globsonicView->setMode(SpectrumWidget::Response);
+    ui->globsonicView->setTitle(
+                QString::fromUtf8("АЧХ — усреднённая амплитудно-частотная характеристика"));
+
+    ui->graphicsView->setAnalyzer(analyzer);
+    ui->graphicsView->setMode(SpectrumWidget::Bars);
+    ui->graphicsView->setTitle(
+                QString::fromUtf8("СПЕКТР — распределение мощности по частотам"));
+
+    timer = new QTimer(this);
+    connect(timer, SIGNAL(timeout()), this, SLOT(slotTimerAlarm()));
+
+    ui->progressBar->setRange(0, 100);
+    ui->progressBar->setValue(0);
+    updatingSlider = true;
+    ui->soundSlider->setRange(0, 100);
+    ui->soundSlider->setValue(0);
+    updatingSlider = false;
+    // Клик в любом месте дорожки должен перематывать, а не прибавлять
+    // pageStep: у слайдера со стилями зона попадания слишком тонкая.
+    ui->soundSlider->installEventFilter(this);
+
+    ui->verticalSlider->setRange(0, 100);
+    ui->verticalSlider->setValue(80);
+    setVolume(80);
+
+    ui->labelFN->setText(QString::fromUtf8("Файл не выбран — Файл → Открыть…"));
+    ui->labelMsg->setText(QString::fromUtf8("готов"));
+    ui->labelTicks->setText(QString("00:00 / 00:00"));
+
+    setWindowTitle(QString::fromUtf8("soundTest — спектральный анализ"));
 }
 
 MainWindow::~MainWindow()
 {
-    playerSt = QUIT;
-    pthread_join(playMusic, NULL);
-    sound_subsystem_dispose();
+    playerSt.store(QUIT);
+
+    if (threadRunning)
+    {
+        pthread_join(playMusic, NULL);
+        threadRunning = false;
+    }
+
+    // Сначала уничтожаем виджеты (останавливаются их таймеры),
+    // затем анализатор, которым они пользовались.
     delete ui;
-}
+    ui = 0;
 
-void MainWindow::on_actionOpen_triggered()
-{
-    QMessageBox myMsgBox;
-    QString _fileName = QFileDialog::getOpenFileName(this, tr("OPEN FILE"), getenv("HOME"), tr("All (*.*)"));
-    //myMsgBox.setText(_fileName);
-    //myMsgBox.exec();
-    ui->labelFN->setText(_fileName);
-    read_audio_file(_fileName);
+    delete analyzer;
+    analyzer = 0;
 
-}
-
-
-//функция обертка
-//необходима для запуска функции воспроизведния
-//в отдельном потоке
-//свя+занно с тем, что потоковая функция должна быть
-//описанна как static, но в этом случае не работают
-//динамически подгружаемые mpg123 и ao
-void* MainWindow::run(void* p)
-{
-    MainWindow* pl = reinterpret_cast<MainWindow*>(p);
-    pl->play_in_thread();
-
-    pthread_exit(0);
-}
-
-void MainWindow::play_in_thread()
-{
-    int read_res = -1 ;
-    if (ao_dev !=NULL)
-    {
-       //здесь происходит управление воспроизведением звука
-       //доработать алгоритм управления звковым потоком
-       //добавить четыре состояния
-       //ИГРА, СТОП, ВПЕРЕД и НАЗАД
-       //добавить возможность вопспроизведения с любой точки
-
-        /* decode and play */
-        printf("Starting thread\n");
-        int ret_from_thread = 0;
-
-        while (!ret_from_thread)
-        {
-
-           //printf("Main cycle\n");
-           switch (playerSt)
-           {
-           case PLAY:
-                read_res = mpg123_read(m, sndbuffer, INBUFF, &done);
-                if (read_res == MPG123_OK)
-                {
-
-                    tickFlag++;
-                    ui->labelTicks->setText(QString("Ticks :  %1").arg(tickFlag));
-
-                    ao_play(ao_dev, (char*) &sndbuffer, done);
-
-                    //printf("drawSample sndbuffer\n");
-                    //drawSndSample();
-                    //printf("was drawing!\n");
-
-
-                }
-                if (read_res == MPG123_DONE)  playerSt = QUIT;
-
-
-                break;
-           case STOP:
-               //ЕСЛИ нажали стоп, то восроизведение начне м с начала
-               tickFlag = 0;
-                setPosition(0);
-                break;
-           case PAUSE:
-                break;
-           case QUIT:
-                //завепршаем поток проигрыванияж
-                ret_from_thread = 1;
-               break;
-           default:
-               usleep(10000);
-               break;
-          }
-        }
-
-      //timer->start(100);//запускаем таймер, для того что бы взаимодействовать с progressbar
-      //while (mpg123_read(m, sndbuffer, INBUFF, &done) == MPG123_OK)
-      //{
-
-      //    tickFlag++;
-      //    ui->labelTicks->setText(QString("Ticks :  %1").arg(tickFlag));
-
-      //     ao_play(ao_dev, (char*) &sndbuffer, done);
-
-      //}
-      //timer->stop();
-    }
-    //if (!tickFlag) tickFlag = 1;
-   //return ;
-    //clearScene();//очищащем память  сцены
-    printf("Stop thread tiks=%d\n", tickFlag);
-
-}
-
-void MainWindow::clearScene()
-{
-    scene->clear();
-}
-
-
-//кнопка PLAY
-void MainWindow::on_pushButton_clicked()
-{
-    playerSt = PLAY;
-    timer->start(50);
-
-}
-
-//кнопка STOP
-void MainWindow::on_pushButton_2_clicked()
-{
-    //stop audio here
-    playerSt = STOP;
-    timer->stop();
-}
-
-
-//
-void MainWindow::setMedia(QString path)
-{
-    //SetPlayerState(STOP);
-
-    if(ao_dev)
-    {
-        ao_close(ao_dev);
-        ao_dev = NULL;
-    }
-
-    mpg123_close(m);
-
-    /* open the file and get the decoding format */
-    mpg123_open(m, path.toLocal8Bit());
-    mpg123_getformat(m, &rate, &channels, &encoding);
-
-    /* set the output format and open the output device */
-    ao_format.bits        = mpg123_encsize(encoding) * BITS;
-    ao_format.rate        = rate;
-    ao_format.channels    = channels;
-    ao_format.byte_format = AO_FMT_NATIVE;
-    ao_format.matrix      = 0;
-
-    ao_dev = ao_open_live(ao_driver, &ao_format, NULL);
-}
-
-void MainWindow::setPosition(qint64 position)
-{
-    // Still, libmpg123 will be confused by the junk data at the beginning.
-    // A hack to fix the seeking behaviour is to insert
-    // mpg123_seek_frame(mh, 10, SEEK_SET);
-    // before doing any position work (matching -k 10 in your initial mpg123 command).
-    mpg123_seek_frame(m, 10, SEEK_SET);
-
-    //qDebug()<<"setPosition pos_ms="<<position;
-
-    double pos_sec=(double)position/1000;   // get position in miliseconds and calculate in seconds
-    int frame=mpg123_timeframe(m,pos_sec); // calculate frame number for position in seconds
-    int seek_res=mpg123_seek_frame(m, frame,SEEK_SET);
-    if(seek_res<0)
-    {
-        //qDebug()<<"Seek error: code="<<seek_res;
-    }
-}
-
-void MainWindow::setVolume(int volume)
-{
-    volume01=(double)volume/100;
-    int res=mpg123_volume(m, volume01);
-    if(res!=MPG123_OK)
-    {
-        //qDebug()<<"Can't set volume to value "<<volume;
-    }
-}
-
-
-//=======================================
-
-
-//открываем звуковой файл и производим декодировку
-int MainWindow::read_audio_file(QString flName)
-{
-    unsigned char inbuff[INBUFF];
-    int handle, bytes_read, gbytes;
-
-    bytes_read = 0;
-    Q_UNUSED(bytes_read);
-    //flName.toStdString().c_str()
-    if((handle = open(flName.toLocal8Bit() ,O_RDONLY))== -1)
-    {
-          ui->labelMsg->setText(tr("Can't open mp3 file.\n"));
-          return 0;
-    }
-
-    //тестовое чтение данных их звукового файла
-    //к вопросизведениб звука никакого отношения не имеет
-    gbytes = 0;
-    //if((bytes_read = read(handle,inbuff,INBUFF))==-1)
-    //{
-    //   ui->labelMsg->setText(tr("Read faile.\n"));
-    //  return 0;
-    //}
-    //gbytes += bytes_read;
-
-    if(ao_dev)
-    {
-        ao_close(ao_dev);
-        ao_dev = NULL;
-    }
-
-    mpg123_close(m);
-
-
-    if (m) {
-       pthread_mutex_lock(&playerMutex);
-       playerSt = QUIT;
-       mpg123_open(m,flName.toLocal8Bit());
-       //            flName.toStdString().c_str());
-       mpg123_getformat(m, &rate, &channels, &encoding);
-       //printf("rate = %d, channels = %ld encoding = %ld\n", rate, channels, encoding);
-       gbytes =  mpg123_length(m);
-       if (buffer != NULL)  free(buffer);
-       buffer = (unsigned char*) malloc(UP_BUFFER_SIZE * sizeof(unsigned char));
-       widthBar = 12;
-       deltaBar = 13;
-
-
-       gbytes = (int) (gbytes / 4097);
-       ui->labelMsg->setText(QString("Bytes read %1").arg(gbytes));
-       ui->progressBar->setMaximum(gbytes);
-       ui->soundSlider->setMaximum(gbytes);
-       //ui->progressBar->setValue(0);
-       /* set the output format and open the output device */
-       ao_format.bits = mpg123_encsize(encoding) * BITS;
-       ao_format.rate = rate;
-       ao_format.channels = channels;
-       ao_format.byte_format = AO_FMT_NATIVE;
-       ao_format.matrix = 0;
-       ao_dev = ao_open_live(ao_driver, &ao_format, NULL);
-       setPosition(0);
-       playerSt = STOP;
-       //printf("Start playerThread\n");
-       //если слушали музыку до этого, выключаем поток и создаем его заново
-       //if (playMusic != NULL) pthread_join(playMusic,NULL);
-       tickFlag = 0;
-       pthread_mutex_unlock(&playerMutex);
-       pthread_create(&playMusic,NULL,MainWindow::run,this);
-    }
-
-
-    return 1;
+    sound_subsystem_dispose();
 }
 
 int MainWindow::sound_subsystem_init()
 {
-    //произвордим инициализацию библиотек работы со звуком
     ao_initialize();
     ao_driver = ao_default_driver_id();
+
     mpg123_init();
     m = mpg123_new(NULL, &err);
-
-
+    if (!m)
+        return ERROR;
 
     return SUCCESS;
 }
 
 int MainWindow::sound_subsystem_dispose()
 {
+    if (ao_dev)
+    {
+        ao_close(ao_dev);
+        ao_dev = 0;
+    }
 
-    if (buffer != NULL) free(buffer);
-    ao_close(ao_dev);
-    mpg123_close(m);
-    mpg123_delete(m);
+    if (m)
+    {
+        mpg123_close(m);
+        mpg123_delete(m);
+        m = 0;
+    }
+
     mpg123_exit();
     ao_shutdown();
-
     return SUCCESS;
 }
 
-void MainWindow::drawSndSample()
+void *MainWindow::run(void *p)
 {
-
-    int gW, gH;
-    //готовим сцену для отрисовки
-    //printf("Start drawSndSample -- in\n");
-    gW = ui->graphicsView->width();
-    gH = ui->graphicsView->height();
-    QRectF rF(0, 0, gW, gH);
-    scene->setSceneRect(0, 0, gW, gH); //устанавливаем размер нашей сцены, он должен совпадать с размером graphicsView
-    QPolygon backP(QRect(0,0,gW,gH), false) ;
-    //QPen mPen(Qt::green);
-    //QBrush mBrush(Qt::green);
-    QPen wPen(Qt::black);
-    QBrush wBrush(Qt::black);
-    //printf("Start scene clearing\n");
-    scene->addPolygon(backP, wPen, wBrush);
-
-    //printf("Scene was cleared\n");
-    for (int i=0;i<INBUFF - 1;i++ ) drawBar(i, sndbuffer[i], 2, 1);
+    MainWindow *player = reinterpret_cast<MainWindow *>(p);
+    player->play_in_thread();
+    pthread_exit(0);
+    return 0;
 }
 
-void MainWindow::drawBar(int idx, int bHeight, int delta, int wBar)
+void MainWindow::play_in_thread()
 {
+    if (!ao_dev || !m)
+        return;
 
-    //рисукм наш звук
-    int x,y;
-    float acc = 0.5;
-    //printf("Start drawBar idx=%d bHeigth = %d\n", idx, bHeight);
-
-    int x0 = 0; //будем смещать x c помощью глобальной переменной
-    int y0 = ui->graphicsView->height(); //высота наших графиков будет (graphicsView->height ) pix
-
-
-    //QPolygon backP(QRect(0,0,gW,gH), false) ;
-
-    QPen mPen(Qt::blue);
-    QBrush mBrush(Qt::blue);
-    //QPen wPen(Qt::blue);
-    //QBrush wBrush(Qt::white);
-    x = x0+idx*delta;
-    y = y0/2 - (bHeight*acc)/2;
-    //printf("x=%d y=%d deltaBar=%d widthBar=%d\n", x, y, delta, wBar);
-    /*if (gX == 0)
+    while (playerSt.load() != QUIT)
     {
-        sndBurs[idx].gX1= x; sndBurs[idx].gY1 = y; sndBurs[idx].gW1 = widthBar; sndBurs[idx].gH1 = bHeight;
+        // Отложенный переход по таймлайну (выполняется в аудиопотоке,
+        // чтобы не трогать mpg123_handle из GUI одновременно с чтением).
+        const qint64 requestedFrame = seekRequest.exchange(-1);
+        if (requestedFrame >= 0)
+        {
+            setPosition(requestedFrame);
+            framesPlayed.store(requestedFrame);
+        }
 
+        const PlayerState state = playerSt.load();
+
+        if (state == PAUSE)
+        {
+            usleep(5000);
+            continue;
+        }
+
+        if (state == STOP)
+        {
+            setPosition(0);
+            framesPlayed.store(0);
+            playerSt.store(PAUSE);
+            continue;
+        }
+
+        int readResult = mpg123_read(m, sndbuffer, INBUFF, &done);
+
+        if (readResult == MPG123_OK || readResult == MPG123_NEW_FORMAT)
+        {
+            if (done > 0 && analyzer)
+            {
+                const int sampleSize = mpg123_encsize(encoding);
+                const int channelsNow = (channels > 0) ? channels : 1;
+                const int bytesPerFrame = (sampleSize > 0 ? sampleSize : 1) * channelsNow;
+                const size_t frames = done / size_t(bytesPerFrame);
+
+                if (sampleSize == 2)
+                    analyzer->pushPcm16(sndbuffer, frames, channelsNow);
+                else if (sampleSize == 1)
+                    analyzer->pushPcm8(sndbuffer, frames, channelsNow);
+            }
+
+            if (done > 0)
+                ao_play(ao_dev, reinterpret_cast<char *>(sndbuffer), done);
+
+            const off_t position = mpg123_tell(m);
+            if (position >= 0)
+                framesPlayed.store(qint64(position));
+        }
+        else if (readResult == MPG123_DONE)
+        {
+            setPosition(0);
+            framesPlayed.store(totalFrames.load());
+            playerSt.store(PAUSE);
+        }
+        else
+        {
+            usleep(5000);
+        }
     }
+}
+
+void MainWindow::setPosition(qint64 frame)
+{
+    if (!m || frame < 0)
+        return;
+
+    mpg123_seek(m, off_t(frame), SEEK_SET);
+}
+
+void MainWindow::setVolume(int volume)
+{
+    volume01 = qBound(0.0, double(volume) / 100.0, 1.0);
+
+    if (m)
+        mpg123_volume(m, volume01);
+}
+
+int MainWindow::read_audio_file(QString flName)
+{
+    if (flName.isEmpty() || !m)
+        return 0;
+
+    if (timer)
+        timer->stop();
+
+    // Останавливаем старый поток, иначе он продолжит читать mpg123_handle,
+    // который мы сейчас переоткрываем.
+    if (threadRunning)
+    {
+        playerSt.store(QUIT);
+        pthread_join(playMusic, NULL);
+        threadRunning = false;
+    }
+
+    if (ao_dev)
+    {
+        ao_close(ao_dev);
+        ao_dev = 0;
+    }
+
+    mpg123_close(m);
+
+    if (mpg123_open(m, flName.toLocal8Bit().constData()) != MPG123_OK)
+    {
+        ui->labelMsg->setText(QString::fromUtf8("Ошибка открытия: %1")
+                              .arg(QString::fromLocal8Bit(mpg123_strerror(m))));
+        return 0;
+    }
+
+    if (mpg123_getformat(m, &rate, &channels, &encoding) != MPG123_OK ||
+        rate <= 0 || channels <= 0)
+    {
+        ui->labelMsg->setText(QString::fromUtf8("Не удалось определить формат файла"));
+        return 0;
+    }
+
+    const int sampleSize = mpg123_encsize(encoding);
+    if (sampleSize <= 0)
+    {
+        ui->labelMsg->setText(QString::fromUtf8("Неподдерживаемый формат PCM"));
+        return 0;
+    }
+
+    std::memset(&ao_format, 0, sizeof(ao_format));
+    ao_format.bits        = sampleSize * 8;
+    ao_format.rate        = rate;
+    ao_format.channels    = channels;
+    ao_format.byte_format = AO_FMT_NATIVE;
+    ao_format.matrix      = 0;
+
+    ao_dev = ao_open_live(ao_driver, &ao_format, NULL);
+    if (!ao_dev)
+    {
+        ui->labelMsg->setText(QString::fromUtf8("Не удалось открыть аудиоустройство (libao)"));
+        return 0;
+    }
+
+    qint64 total = qint64(mpg123_length(m));
+    if (total < 0)
+        total = 0;
+
+    totalFrames.store(total);
+    framesPlayed.store(0);
+    seekRequest.store(-1);
+
+    if (analyzer)
+    {
+        analyzer->setSampleRate(rate);
+        analyzer->reset();
+    }
+
+    setChartsPaused(false);
+
+    const int maxValue = int(qMin<qint64>(total, 2000000000LL));
+    ui->progressBar->setRange(0, qMax(1, maxValue));
+    ui->progressBar->setValue(0);
+
+    updatingSlider = true;
+    ui->soundSlider->setRange(0, qMax(1, maxValue));
+    ui->soundSlider->setPageStep(int(qMax<qint64>(1, qint64(rate) * 5)));
+    ui->soundSlider->setSingleStep(int(qMax<qint64>(1, qint64(rate))));
+    ui->soundSlider->setValue(0);
+    updatingSlider = false;
+
+    const QString fileName = QFileInfo(flName).fileName();
+    const QString channelText = (channels == 1)
+            ? QString::fromUtf8("моно")
+            : ((channels == 2) ? QString::fromUtf8("стерео")
+                               : QString::fromUtf8("%1 кан.").arg(channels));
+
+    ui->labelFN->setText(fileName);
+    ui->labelFN->setToolTip(flName);
+    ui->labelMsg->setText(QString::fromUtf8("%1 · %2 кГц · %3 · %4 бит")
+                          .arg(QFileInfo(flName).suffix().toUpper())
+                          .arg(double(rate) / 1000.0, 0, 'f', 1)
+                          .arg(channelText)
+                          .arg(sampleSize * 8));
+    ui->labelTicks->setText(QString("00:00 / %1").arg(formatTime(total, rate)));
+
+    setWindowTitle(QString::fromUtf8("%1 — soundTest").arg(fileName));
+
+    setPosition(0);
+    setVolume(ui->verticalSlider->value());
+    playerSt.store(PAUSE);
+
+    if (pthread_create(&playMusic, NULL, MainWindow::run, this) == 0)
+        threadRunning = true;
     else
+        ui->labelMsg->setText(QString::fromUtf8("Не удалось создать поток воспроизведения"));
+
+    return 1;
+}
+
+void MainWindow::playFile(const QString &fileName)
+{
+    if (read_audio_file(fileName))
     {
-        QPolygon bar(QRect(sndBurs[idx].gX1,sndBurs[idx].gY1,sndBurs[idx].gW1,sndBurs[idx].gH1), false);
-        scene->addPolygon(bar, wPen, wBrush);
-
+        playerSt.store(PLAY);
+        if (timer && !timer->isActive())
+            timer->start(80);
     }
-
-    */
-    //scene->addPolygon(*backP, mPen, mBrush);
-
-    //QBrush *blueBrush = new QBrush(Qt::white);
-    //scene->setBackgroundBrush(*blueBrush);
-    //scene->addPolygon(backP, wPen, wBrush);
-    sndBurs[idx].gX1= x; sndBurs[idx].gY1 = y; sndBurs[idx].gW1 = wBar; sndBurs[idx].gH1 = y0/2+(bHeight*acc)/2;
-    //printf("Creating QRECT\n");
-    QPolygon bar(QRect(x,y,wBar,(int)bHeight*acc), false);
-    //printf("Add poligon\n");
-    scene->addPolygon(bar, mPen, mBrush);
-    //printf("Poligon was added\n");
-    //if (idx == (INBUFF -1)) gX = 1; //первый запуск прошел
-
 }
 
-void MainWindow::slotTimerAlarm()
+void MainWindow::on_actionOpen_triggered()
 {
-   pthread_mutex_lock(&playerMutex);
-   //printf("Timer tick start\n");
-   ui->soundSlider->setValue(tickFlag);
-   //printf("Tick = %d\n", tickFlag);
-   //rawbuff = QString("%1 %2 %3 %4 %5 %6 %7 %8 %9 %10").arg(sndbuffer[0]).arg(sndbuffer[1]).arg(sndbuffer[2]).arg(sndbuffer[3]).arg(sndbuffer[4]).arg(sndbuffer[5]).arg(sndbuffer[6]).arg(sndbuffer[7]).arg(sndbuffer[8]).arg(sndbuffer[9]);
-   //ui->progressBar->setValue(tickFlag++);
-   //ui->labelrawdata->setText(rawbuff);
+    const QString fileName = QFileDialog::getOpenFileName(
+                this,
+                QString::fromUtf8("Открыть аудиофайл"),
+                QDir::homePath(),
+                QString::fromUtf8("MP3 (*.mp3 *.mp2 *.mp1);;Все файлы (*.*)"));
 
-   //отрисовку будем делать в отдельном классе
-   //drawSndSample();
-   unsigned char temp[INBUFF];
-   for (int i=0; i<INBUFF; i++) temp[i] = 0;
-   int delta = INBUFF/512;
-   int k=0;
-   for (int i=0; i<512; i++)
-   {
-       temp[i]= sndbuffer[k];
-       k+=delta;
-   }
-   sChart->update(temp);
-   ui->progressBar->setValue(tickFlag);
+    if (fileName.isEmpty())
+        return;
 
-   pthread_mutex_unlock(&playerMutex);
-   if (tickFlag >= ui->progressBar->maximum()) timer->stop();
+    read_audio_file(fileName);
 }
 
-void MainWindow::on_progressBar_valueChanged(int value)
+void MainWindow::on_pushButton_clicked()
 {
-    //
-    //if (value > ui->progressBar->maximum()) ui->progressBar->setValue(0);
+    if (!threadRunning)
+        return;
+
+    playerSt.store(PLAY);
+    setChartsPaused(false);
+
+    if (timer && !timer->isActive())
+        timer->start(80);
 }
 
-void MainWindow::on_verticalSlider_valueChanged(int value)
+void MainWindow::on_pushButton_2_clicked()
 {
-    //изменяем громкость
-    setVolume(value);
+    if (!threadRunning)
+        return;
+
+    // Переход в начало выполнит аудиопоток, чтобы не трогать mpg123_handle
+    // из GUI-потока одновременно с декодированием.
+    playerSt.store(PAUSE);
+    seekRequest.store(0);
+    framesPlayed.store(0);
+    setChartsPaused(false);
+
+    if (timer)
+        timer->stop();
+
+    ui->progressBar->setValue(0);
+    updatingSlider = true;
+    ui->soundSlider->setValue(0);
+    updatingSlider = false;
+    ui->labelTicks->setText(QString("00:00 / %1").arg(formatTime(totalFrames.load(), rate)));
+}
+
+void MainWindow::on_pushButton_3_clicked()
+{
+    jumpBy(-qint64(double(rate) * 5.0));
+}
+
+void MainWindow::on_pushButton_4_clicked()
+{
+    jumpBy(qint64(double(rate) * 5.0));
+}
+
+void MainWindow::jumpBy(qint64 frames)
+{
+    if (!threadRunning || rate <= 0)
+        return;
+
+    seekTo(framesPlayed.load() + frames);
 }
 
 void MainWindow::on_toolButton_2_clicked()
 {
-    playerSt = PAUSE;
-    timer->stop();
+    if (!threadRunning)
+        return;
+
+    if (playerSt.load() == PLAY)
+    {
+        playerSt.store(PAUSE);
+        setChartsPaused(true);
+    }
+    else
+    {
+        playerSt.store(PLAY);
+        setChartsPaused(false);
+        if (timer && !timer->isActive())
+            timer->start(80);
+    }
+}
+
+void MainWindow::setChartsPaused(bool paused)
+{
+    if (!ui)
+        return;
+
+    ui->globsonicView->setPaused(paused);
+    ui->graphicsView->setPaused(paused);
+}
+
+void MainWindow::on_soundSlider_valueChanged(int value)
+{
+    // Программное обновление позиции и перетаскивание ползунка сюда не
+    // относятся: первое отсекается флагом, второе обрабатывается в
+    // sliderReleased, чтобы не перематывать файл на каждом пикселе.
+    if (updatingSlider || !threadRunning || ui->soundSlider->isSliderDown())
+        return;
+
+    seekTo(qint64(value));
+}
+
+void MainWindow::on_soundSlider_sliderReleased()
+{
+    if (!threadRunning)
+        return;
+
+    seekTo(qint64(ui->soundSlider->value()));
+}
+
+void MainWindow::seekTo(qint64 frame)
+{
+    if (rate <= 0)
+        return;
+
+    const qint64 total = totalFrames.load();
+
+    if (frame < 0)
+        frame = 0;
+    if (total > 0 && frame > total)
+        frame = total;
+
+    framesPlayed.store(frame);
+    seekRequest.store(frame);
+
+    ui->labelTicks->setText(QString("%1 / %2")
+                            .arg(formatTime(frame, rate))
+                            .arg(formatTime(total, rate)));
+
+    if (timer && !timer->isActive())
+        timer->start(80);
+}
+
+bool MainWindow::eventFilter(QObject *watched, QEvent *event)
+{
+    if (watched == ui->soundSlider && event->type() == QEvent::MouseButtonPress)
+    {
+        QMouseEvent *mouse = static_cast<QMouseEvent *>(event);
+
+        if (mouse->button() == Qt::LeftButton && threadRunning)
+        {
+            QStyleOptionSlider option;
+            option.initFrom(ui->soundSlider);
+            option.orientation  = ui->soundSlider->orientation();
+            option.minimum      = ui->soundSlider->minimum();
+            option.maximum      = ui->soundSlider->maximum();
+            option.sliderPosition = ui->soundSlider->sliderPosition();
+            option.sliderValue  = ui->soundSlider->value();
+            option.singleStep   = ui->soundSlider->singleStep();
+            option.pageStep     = ui->soundSlider->pageStep();
+            option.upsideDown   = false;
+
+            const QStyle::SubControl control =
+                    ui->soundSlider->style()->hitTestComplexControl(
+                        QStyle::CC_Slider, &option, mouse->pos(), ui->soundSlider);
+
+            // По ползунку — обычное перетаскивание, по остальной дорожке —
+            // мгновенный переход в точку клика.
+            if (control != QStyle::SC_SliderHandle)
+            {
+                const int value = QStyle::sliderValueFromPosition(
+                            option.minimum, option.maximum,
+                            mouse->pos().x(), ui->soundSlider->width(),
+                            option.upsideDown);
+
+                seekTo(qint64(value));
+
+                updatingSlider = true;
+                ui->soundSlider->setValue(value);
+                updatingSlider = false;
+
+                return true;
+            }
+        }
+    }
+
+    return QMainWindow::eventFilter(watched, event);
+}
+
+void MainWindow::on_verticalSlider_valueChanged(int value)
+{
+    setVolume(value);
+}
+
+void MainWindow::slotTimerAlarm()
+{
+    const qint64 total = totalFrames.load();
+    qint64 position = framesPlayed.load();
+
+    if (total <= 0)
+        return;
+
+    if (position < 0)
+        position = 0;
+    if (position > total)
+        position = total;
+
+    const int value = int(qMin<qint64>(position, 2000000000LL));
+
+    ui->progressBar->setValue(value);
+
+    if (!ui->soundSlider->isSliderDown())
+    {
+        updatingSlider = true;
+        ui->soundSlider->setValue(value);
+        updatingSlider = false;
+    }
+
+    ui->labelTicks->setText(QString("%1 / %2")
+                            .arg(formatTime(position, rate))
+                            .arg(formatTime(total, rate)));
+
+    if (position >= total && playerSt.load() == PAUSE && timer)
+        timer->stop();
 }

@@ -27,6 +27,7 @@ public:
     void setDelta(int dBars);
     void setLenDataSeries(int len);
     void createHoldbars();
+    void  appendBars(int len, unsigned char data[]);
     void drawBars();
     void update(unsigned char data[]);
 

@@ -2,30 +2,22 @@
 #define MAINWINDOW_H
 
 #include <QMainWindow>
-#include <QTime>
 #include <QTimer>
-#include <QGraphicsView>
-#include <QGraphicsScene>
-#include <unistd.h>
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <fcntl.h>
-#include <pthread.h>
+#include <atomic>
 
+#include <pthread.h>
+#include <unistd.h>
 
 #include <mpg123.h>
 #include <ao/ao.h>
 
-#include "soundchart.h"
+#include "spectrumanalyzer.h"
 
 #define SUCCESS 1
-#define ERROR 0
-#define BITS 8
-#define INBUFF 16384
-#define OUTBUFF 32768
-#define UP_BUFFER_SIZE 4096
+#define ERROR   0
+#define INBUFF  16384
 
-typedef enum {STOP, PLAY, PAUSE, QUIT} PlayerState;
+typedef enum { STOP, PLAY, PAUSE, QUIT } PlayerState;
 
 namespace Ui {
 class MainWindow;
@@ -38,70 +30,60 @@ class MainWindow : public QMainWindow
 public:
     explicit MainWindow(QWidget *parent = 0);
     ~MainWindow();
-    int read_audio_file(QString flName);
-    int sound_subsystem_init();
-    int sound_subsystem_dispose();
+
+    int  read_audio_file(QString flName);
+    void playFile(const QString &fileName);
+    int  sound_subsystem_init();
+    int  sound_subsystem_dispose();
     void play_in_thread();
-    void drawBar(int idx, int bHeigth, int delta, int wBar);
-    void drawSndSample();
-    void setMedia(QString path);
-    void setPosition(qint64 position);
+    void setPosition(qint64 frame);   // позиция в PCM-кадрах
     void setVolume(int volume);
-    void clearScene();
 
-    mpg123_handle *m;     //указатель на mpg123 исходный файл
-    unsigned char *buffer; //буффер, куда записываем семплы
-    ao_device *ao_dev; //устройство вывода звука
-    int ao_driver;
-    size_t buffer_size;
-    size_t done;
-    int err;
-
+    // Данные, которыми обмениваются GUI и поток воспроизведения.
+    mpg123_handle   *m;
+    ao_device       *ao_dev;
+    int              ao_driver;
+    size_t           done;
+    int              err;
     ao_sample_format ao_format;
-    int channels, encoding;
-    long rate;
-    unsigned char sndbuffer[INBUFF];
-    QString rawbuff;
-    struct mPoint { int gX1 ;
-              int gY1 ;
-              int gW1 ;
-              int gH1 ;
-            }  ;
-
-    mPoint sndBurs[INBUFF]; // здесь будем хранить бары построенные от семплов
-    int widthBar; //ширина одного тика
-    int deltaBar; //расстояние от начала бара n-1 до бара n
-    int gX;
-
+    int              channels;
+    int              encoding;
+    long             rate;
+    unsigned char    sndbuffer[INBUFF];
 
 private slots:
     void on_actionOpen_triggered();
-
-    void on_pushButton_clicked();
-
-    void on_pushButton_2_clicked();
-
-    void on_progressBar_valueChanged(int value);
-
+    void on_pushButton_clicked();      // Play
+    void on_pushButton_2_clicked();    // Stop
+    void on_pushButton_3_clicked();    // -5 c
+    void on_pushButton_4_clicked();    // +5 c
+    void on_toolButton_2_clicked();    // Pause / Resume
+    void on_soundSlider_valueChanged(int value);
+    void on_soundSlider_sliderReleased();
+    void on_verticalSlider_valueChanged(int value);
     void slotTimerAlarm();
 
-    void on_verticalSlider_valueChanged(int value);
-
-    void on_toolButton_2_clicked();
-
 private:
-    static void* run(void* p);//воспроизводим аудиопоток
-    int tickFlag;
+    static void *run(void *p);
+    void jumpBy(qint64 frames);
+    void seekTo(qint64 frame);
+    void setChartsPaused(bool paused);
+    bool eventFilter(QObject *watched, QEvent *event);
+
     pthread_t playMusic;
-    QTimer *timer;
-    Ui::MainWindow *ui;
-    static pthread_mutex_t  playerMutex;
-    SoundChart* sChart;
-    double           volume01;
-    PlayerState      playerSt;
-    QGraphicsScene      *scene;     // Объявляем сцену для отрисовки
+    bool      threadRunning;
 
+    QTimer            *timer;
+    Ui::MainWindow    *ui;
+    SpectrumAnalyzer  *analyzer;
 
+    double volume01;
+
+    std::atomic<PlayerState> playerSt;
+    std::atomic<qint64>      framesPlayed;
+    std::atomic<qint64>      totalFrames;
+    std::atomic<qint64>      seekRequest; // < 0 — нет запроса
+    bool                     updatingSlider;
 };
 
 #endif // MAINWINDOW_H
